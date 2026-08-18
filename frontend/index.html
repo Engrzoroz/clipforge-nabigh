@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#070816" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>ClipForge — YouTube Clip Studio</title>
+  <meta name="description" content="Pick exact moments, keep source quality, and add captions." />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="aurora aurora-a"></div><div class="aurora aurora-b"></div><div class="noise"></div>
+  <main class="shell">
+    <nav class="nav glass">
+      <div class="brand"><span class="brand-mark">C</span><span>ClipForge</span><span class="beta">BETA</span></div>
+      <button class="icon-btn" id="themePulse" aria-label="Pulse animation">✦</button>
+    </nav>
+
+    <section class="hero">
+      <div class="hero-badge">⚡ No giant downloads on your phone</div>
+      <h1>Turn long videos into <span>perfect clips.</span></h1>
+      <p>Paste a YouTube link, choose the exact moments, apply captions, and download your clips in one ZIP.</p>
+    </section>
+
+    <section class="panel glass url-panel">
+      <label for="url">YouTube URL</label>
+      <div class="url-row">
+        <div class="url-input-wrap"><span>▶</span><input id="url" type="url" inputmode="url" placeholder="https://youtube.com/watch?v=…" autocomplete="off" /></div>
+        <button id="analyzeBtn" class="primary"><span>Find video</span><b>→</b></button>
+      </div>
+      <div class="microcopy">Use only videos you own or have permission to process.</div>
+    </section>
+
+    <section id="videoCard" class="panel glass video-card hidden">
+      <div class="thumb-wrap"><img id="thumb" alt="Video thumbnail" /><div id="durationBadge" class="duration"></div></div>
+      <div class="video-info">
+        <div class="eyebrow">VIDEO FOUND</div><h2 id="videoTitle"></h2><p id="videoUploader"></p>
+        <div id="resolutionPills" class="pills"></div>
+      </div>
+    </section>
+
+    <section id="studio" class="hidden studio-grid">
+      <div class="panel glass clips-panel">
+        <div class="section-head"><div><div class="eyebrow">STEP 1</div><h3>Choose your clips</h3></div><button id="addClip" class="ghost">＋ Add clip</button></div>
+        <div id="chapterArea" class="chapter-area hidden"><div class="subhead">Video chapters — tap to add</div><div id="chapters" class="chapter-list"></div></div>
+        <div id="clips" class="clips"></div>
+      </div>
+
+      <div class="panel glass settings-panel">
+        <div class="eyebrow">STEP 2</div><h3>Export settings</h3>
+        <label class="setting"><span><b>Quality</b><small>Original keeps the best available stream</small></span><select id="quality"><option value="original">Original / Best</option><option value="2160">4K · 2160p</option><option value="1440">2K · 1440p</option><option value="1080">Full HD · 1080p</option><option value="720">HD · 720p</option><option value="480">480p</option></select></label>
+        <div class="setting"><span><b>Apply captions</b><small>Use YouTube manual/auto captions when available</small></span><button id="captionToggle" class="toggle on" aria-pressed="true"><i></i></button></div>
+        <label class="setting" id="captionLangRow"><span><b>Caption language</b><small>Examples: en, ur, hi</small></span><input id="captionLang" class="mini-input" value="en" maxlength="24" /></label>
+        <label class="setting" id="captionModeRow"><span><b>Caption mode</b><small>Soft keeps video bit-for-bit; Burn is always visible</small></span><select id="captionMode"><option value="soft">Soft · Preserve video</option><option value="burn">Burn-in · Slower</option></select></label>
+        <button id="processBtn" class="primary process"><span>Forge my clips</span><b>✦</b></button>
+        <p class="note">Soft captions preserve the selected video stream. Burn-in captions require video re-encoding.</p>
+      </div>
+    </section>
+
+    <section id="progressPanel" class="panel glass progress-panel hidden">
+      <div class="orb"><div></div></div><div class="grow"><div class="section-head"><div><div class="eyebrow">PROCESSING</div><h3 id="progressMessage">Preparing…</h3></div><b id="progressPct">0%</b></div><div class="track"><i id="progressBar"></i></div><p>Keep this page open until your download is ready.</p></div>
+    </section>
+
+    <section id="donePanel" class="panel glass done hidden">
+      <div class="done-icon">✓</div><div><div class="eyebrow">READY</div><h3>Your clips are forged.</h3><p id="doneMeta">Download the ZIP to your phone.</p></div><a id="downloadBtn" class="primary download" href="#">Download ZIP ↓</a>
+    </section>
+
+    <footer>Created by <button id="creatorBtn" class="creator">Nabigh Ahmed <span class="verified">✓</span></button></footer>
+  </main>
+
+  <div id="creatorModal" class="creator-modal" aria-hidden="true"><div class="creator-card glass"><button id="closeCreator" class="close">×</button><div class="creator-avatar">NA<div class="ring"></div></div><div class="verified big">✓</div><h2>Nabigh Ahmed</h2><p>Creator of ClipForge</p><div class="signature">Designed to make clipping feel effortless.</div></div><div id="particles"></div></div>
+  <div id="toast" class="toast"></div>
+  <script src="config.js"></script><script src="app.js"></script>
+</body>
+</html>

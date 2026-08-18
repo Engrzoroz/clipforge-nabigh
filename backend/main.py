@@ -1,4 +1,3 @@
-import asyncio
 import json
 import os
 import re
@@ -7,6 +6,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.request
 import uuid
 import zipfile
 from pathlib import Path
@@ -28,14 +28,16 @@ MAX_TOTAL_CLIP_SECONDS = int(os.getenv("MAX_TOTAL_CLIP_SECONDS", "900"))
 JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", "1800"))
 MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "1"))
 ALLOWED_ORIGINS = [x.strip() for x in os.getenv("ALLOWED_ORIGINS", "*").split(",") if x.strip()]
+POT_BASE_URL = os.getenv("POT_BASE_URL", "http://127.0.0.1:4416")
+YOUTUBE_CLIENTS = [x.strip() for x in os.getenv("YOUTUBE_CLIENTS", "mweb,web_embedded,tv").split(",") if x.strip()]
 
-app = FastAPI(title=APP_NAME, version="1.0.0")
+app = FastAPI(title=APP_NAME, version="1.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["*"] ,
-    allow_headers=["*"] ,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 jobs: dict[str, dict] = {}
@@ -44,13 +46,16 @@ job_slots = threading.Semaphore(MAX_CONCURRENT_JOBS)
 
 YOUTUBE_RE = re.compile(r"^(https?://)?(www\.)?(youtube\.com|youtu\.be)/", re.I)
 
+
 class AnalyzeRequest(BaseModel):
     url: HttpUrl
+
 
 class Clip(BaseModel):
     start: float = Field(ge=0)
     end: float = Field(gt=0)
     label: str | None = Field(default=None, max_length=80)
+
 
 class ProcessRequest(BaseModel):
     url: HttpUrl
@@ -82,14 +87,48 @@ def run(cmd: list[str], cwd: Path | None = None, timeout: int = 900) -> subproce
         raise RuntimeError("Processing timed out on the current host.")
     except subprocess.CalledProcessError as e:
         msg = (e.stderr or e.stdout or "Unknown processing error").strip()
-        raise RuntimeError(msg[-2500:])
+        raise RuntimeError(msg[-3000:])
+
+
+def youtube_args(client: str) -> list[str]:
+    return [
+        "--no-playlist",
+        "--no-warnings",
+        "--js-runtimes",
+        "node",
+        "--retries",
+        "3",
+        "--fragment-retries",
+        "3",
+        "--socket-timeout",
+        "30",
+        "--extractor-args",
+        f"youtube:player-client={client}",
+        "--extractor-args",
+        f"youtubepot-bgutilhttp:base_url={POT_BASE_URL}",
+    ]
+
+
+def run_youtube(extra_args: list[str], url: str, timeout: int) -> subprocess.CompletedProcess:
+    errors = []
+    for client in YOUTUBE_CLIENTS:
+        try:
+            return run(["yt-dlp", *youtube_args(client), *extra_args, url], timeout=timeout)
+        except Exception as e:
+            errors.append(f"{client}: {str(e)[-900:]}")
+    detail = " | ".join(errors[-3:])
+    raise RuntimeError(
+        "YouTube refused this server request after trying the PO-token and fallback clients. "
+        "This can happen when YouTube flags a datacenter IP. " + detail
+    )
 
 
 def ytdlp_json(url: str) -> dict:
-    cp = run([
-        "yt-dlp", "--no-playlist", "--skip-download", "--dump-single-json",
-        "--no-warnings", url
-    ], timeout=90)
+    cp = run_youtube(
+        ["--skip-download", "--dump-single-json"],
+        url,
+        timeout=120,
+    )
     return json.loads(cp.stdout)
 
 
@@ -107,11 +146,13 @@ def extract_chapters(info: dict) -> list[dict]:
         start = float(c.get("start_time") or 0)
         end = float(c.get("end_time") or start)
         if end > start:
-            chapters.append({
-                "title": (c.get("title") or f"Chapter {idx+1}")[:100],
-                "start": start,
-                "end": end,
-            })
+            chapters.append(
+                {
+                    "title": (c.get("title") or f"Chapter {idx + 1}")[:100],
+                    "start": start,
+                    "end": end,
+                }
+            )
     return chapters[:40]
 
 
@@ -138,43 +179,82 @@ def quality_selector(q: str) -> str:
 
 
 def find_downloaded_media(folder: Path, prefix: str) -> Path:
-    candidates = [p for p in folder.glob(prefix + ".*") if p.suffix.lower() not in {".part", ".ytdl", ".srt", ".vtt", ".ass", ".json"}]
+    candidates = [
+        p
+        for p in folder.glob(prefix + ".*")
+        if p.suffix.lower() not in {".part", ".ytdl", ".srt", ".vtt", ".ass", ".json"}
+    ]
     if not candidates:
         raise RuntimeError("yt-dlp completed but no media file was produced.")
     return max(candidates, key=lambda p: p.stat().st_size)
 
 
+def clear_output_prefix(outprefix: Path) -> None:
+    for p in outprefix.parent.glob(outprefix.name + ".*"):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
 def download_section(url: str, start: float, end: float, quality: str, outprefix: Path) -> Path:
     section = f"*{fmt_time(start)}-{fmt_time(end)}"
-    cmd = [
-        "yt-dlp", "--no-playlist", "--no-warnings",
-        "-f", quality_selector(quality),
-        "--download-sections", section,
-        "--merge-output-format", "mp4",
-        "--remux-video", "mp4",
-        "-o", str(outprefix) + ".%(ext)s",
-        url,
-    ]
-    run(cmd, timeout=1200)
-    return find_downloaded_media(outprefix.parent, outprefix.name)
+    errors = []
+    for client in YOUTUBE_CLIENTS:
+        clear_output_prefix(outprefix)
+        cmd = [
+            "yt-dlp",
+            *youtube_args(client),
+            "-f",
+            quality_selector(quality),
+            "--download-sections",
+            section,
+            "--merge-output-format",
+            "mp4",
+            "--remux-video",
+            "mp4",
+            "-o",
+            str(outprefix) + ".%(ext)s",
+            url,
+        ]
+        try:
+            run(cmd, timeout=1200)
+            return find_downloaded_media(outprefix.parent, outprefix.name)
+        except Exception as e:
+            errors.append(f"{client}: {str(e)[-900:]}")
+    raise RuntimeError("Could not download the selected clip. " + " | ".join(errors[-3:]))
 
 
 def download_subtitles(url: str, lang: str, folder: Path) -> Path | None:
     prefix = folder / "source_subs"
-    cmd = [
-        "yt-dlp", "--no-playlist", "--skip-download", "--no-warnings",
-        "--write-subs", "--write-auto-subs",
-        "--sub-langs", f"{lang}.*,{lang}",
-        "--convert-subs", "srt",
-        "-o", str(prefix) + ".%(ext)s",
-        url,
-    ]
-    try:
-        run(cmd, timeout=120)
-    except Exception:
-        return None
-    srts = sorted(folder.glob("source_subs*.srt"))
-    return srts[0] if srts else None
+    for client in YOUTUBE_CLIENTS:
+        for p in folder.glob("source_subs*"):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        cmd = [
+            "yt-dlp",
+            *youtube_args(client),
+            "--skip-download",
+            "--write-subs",
+            "--write-auto-subs",
+            "--sub-langs",
+            f"{lang}.*,{lang}",
+            "--convert-subs",
+            "srt",
+            "-o",
+            str(prefix) + ".%(ext)s",
+            url,
+        ]
+        try:
+            run(cmd, timeout=180)
+            srts = sorted(folder.glob("source_subs*.srt"))
+            if srts:
+                return srts[0]
+        except Exception:
+            continue
+    return None
 
 
 def crop_srt(source: Path, start: float, end: float, target: Path) -> bool:
@@ -183,7 +263,9 @@ def crop_srt(source: Path, start: float, end: float, target: Path) -> bool:
         items = list(srt.parse(text))
     except Exception:
         return False
+
     import datetime as dt
+
     start_td = dt.timedelta(seconds=start)
     end_td = dt.timedelta(seconds=end)
     kept = []
@@ -193,7 +275,7 @@ def crop_srt(source: Path, start: float, end: float, target: Path) -> bool:
         ns = max(item.start, start_td) - start_td
         ne = min(item.end, end_td) - start_td
         if ne > ns:
-            kept.append(srt.Subtitle(index=len(kept)+1, start=ns, end=ne, content=item.content))
+            kept.append(srt.Subtitle(index=len(kept) + 1, start=ns, end=ne, content=item.content))
     if not kept:
         return False
     target.write_text(srt.compose(kept), encoding="utf-8")
@@ -206,24 +288,67 @@ def ffmpeg_escape_path(path: Path) -> str:
 
 
 def apply_soft_subs(media: Path, subs: Path, output: Path) -> None:
-    run([
-        "ffmpeg", "-y", "-i", str(media), "-i", str(subs),
-        "-map", "0:v:0", "-map", "0:a?", "-map", "1:0",
-        "-c:v", "copy", "-c:a", "copy", "-c:s", "mov_text",
-        "-metadata:s:s:0", "language=eng", "-movflags", "+faststart",
-        str(output)
-    ], timeout=600)
+    run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(media),
+            "-i",
+            str(subs),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-map",
+            "1:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "copy",
+            "-c:s",
+            "mov_text",
+            "-metadata:s:s:0",
+            "language=eng",
+            "-movflags",
+            "+faststart",
+            str(output),
+        ],
+        timeout=600,
+    )
 
 
 def apply_burn_subs(media: Path, subs: Path, output: Path) -> None:
-    style = "FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=42"
+    style = (
+        "FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,"
+        "OutlineColour=&H00101010,BorderStyle=1,Outline=3,"
+        "Shadow=1,Alignment=2,MarginV=42"
+    )
     vf = f"subtitles='{ffmpeg_escape_path(subs)}':force_style='{style}'"
-    run([
-        "ffmpeg", "-y", "-i", str(media), "-vf", vf,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "17",
-        "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
-        str(output)
-    ], timeout=1800)
+    run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(media),
+            "-vf",
+            vf,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "17",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            str(output),
+        ],
+        timeout=1800,
+    )
 
 
 def sanitize_label(label: str | None, idx: int) -> str:
@@ -249,7 +374,9 @@ def process_job(job_id: str, req: ProcessRequest):
             if duration <= 0:
                 raise RuntimeError("Could not determine video duration.")
             if duration > MAX_VIDEO_DURATION:
-                raise RuntimeError(f"Video is longer than this host's limit ({MAX_VIDEO_DURATION//60} minutes).")
+                raise RuntimeError(
+                    f"Video is longer than this host's limit ({MAX_VIDEO_DURATION // 60} minutes)."
+                )
 
             source_subs = None
             if req.captions:
@@ -271,7 +398,11 @@ def process_job(job_id: str, req: ProcessRequest):
                 if req.captions and source_subs:
                     clipped_subs = folder / f"subs_{i:02d}.srt"
                     if crop_srt(source_subs, clip.start, clip.end, clipped_subs):
-                        update_job(job_id, progress=base_progress + 5, message=f"Applying captions to clip {i}/{total}…")
+                        update_job(
+                            job_id,
+                            progress=base_progress + 5,
+                            message=f"Applying captions to clip {i}/{total}…",
+                        )
                         if req.caption_mode == "soft":
                             apply_soft_subs(media, clipped_subs, final)
                         else:
@@ -316,11 +447,29 @@ def cleanup_loop():
             shutil.rmtree(ROOT / jid, ignore_errors=True)
         time.sleep(60)
 
+
+def pot_status() -> dict:
+    try:
+        with urllib.request.urlopen(f"{POT_BASE_URL}/ping", timeout=2) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        return {"ok": True, "version": data.get("version")}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:160]}
+
+
 threading.Thread(target=cleanup_loop, daemon=True).start()
+
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "name": APP_NAME, "jobs": len(jobs)}
+    return {
+        "ok": True,
+        "name": APP_NAME,
+        "jobs": len(jobs),
+        "pot_provider": pot_status(),
+        "youtube_clients": YOUTUBE_CLIENTS,
+    }
+
 
 @app.post("/api/analyze")
 def analyze(req: AnalyzeRequest):
@@ -328,11 +477,15 @@ def analyze(req: AnalyzeRequest):
     try:
         info = ytdlp_json(url)
     except Exception as e:
-        raise HTTPException(422, f"Could not analyze this video: {str(e)[:1200]}")
+        raise HTTPException(422, f"Could not analyze this video: {str(e)[:1600]}")
     data = public_info(info)
     if data["duration"] and data["duration"] > MAX_VIDEO_DURATION:
-        data["warning"] = f"This free-host profile is configured for videos up to {MAX_VIDEO_DURATION//60} minutes."
+        data["warning"] = (
+            f"This free-host profile is configured for videos up to "
+            f"{MAX_VIDEO_DURATION // 60} minutes."
+        )
     return data
+
 
 @app.post("/api/process")
 def process(req: ProcessRequest):
@@ -341,13 +494,19 @@ def process(req: ProcessRequest):
         raise HTTPException(400, "Add at least one clip.")
     if len(req.clips) > MAX_CLIPS:
         raise HTTPException(400, f"Maximum {MAX_CLIPS} clips per job.")
+
     total = 0.0
     for i, clip in enumerate(req.clips, 1):
         if clip.end <= clip.start:
             raise HTTPException(400, f"Clip {i}: end must be after start.")
         total += clip.end - clip.start
+
     if total > MAX_TOTAL_CLIP_SECONDS:
-        raise HTTPException(400, f"Total selected duration is limited to {MAX_TOTAL_CLIP_SECONDS//60} minutes on this host profile.")
+        raise HTTPException(
+            400,
+            f"Total selected duration is limited to "
+            f"{MAX_TOTAL_CLIP_SECONDS // 60} minutes on this host profile.",
+        )
 
     job_id = uuid.uuid4().hex[:16]
     jobs[job_id] = {
@@ -360,6 +519,7 @@ def process(req: ProcessRequest):
     threading.Thread(target=process_job, args=(job_id, req), daemon=True).start()
     return jobs[job_id]
 
+
 @app.get("/api/job/{job_id}")
 def job_status(job_id: str):
     with job_lock:
@@ -367,6 +527,7 @@ def job_status(job_id: str):
         if not job:
             raise HTTPException(404, "Job not found or expired.")
         return {k: v for k, v in job.items() if k != "created_at"}
+
 
 @app.get("/api/download/{job_id}")
 def download(job_id: str):

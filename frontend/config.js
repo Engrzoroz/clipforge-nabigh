@@ -1,3 +1,3 @@
 window.CLIPFORGE_CONFIG = {
-  API_BASE: "http://127.0.0.1:10000"
+  API_BASE: "https://clipforge-nabigh.onrender.com"
 };
